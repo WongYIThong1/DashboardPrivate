@@ -19,7 +19,7 @@ import { IconMail, IconLock, IconUser, IconLoader2, IconAlertCircle, IconEye, Ic
 import { toast } from "sonner"
 import { createAntiBotChallenge, validateAntiBotChallenge, cleanupAntiBotChallenge, trackInputTiming, type AntiBotChallenge } from "@/lib/anti-bot"
 import { checkRateLimit } from "@/lib/rate-limit"
-import { SliderCaptcha } from "@/components/slider-captcha"
+import { TurnstileCaptcha } from "@/components/turnstile-captcha"
 
 export default function RegisterPage() {
   const router = useRouter()
@@ -36,7 +36,8 @@ export default function RegisterPage() {
   
   // Anti-bot challenge
   const [antiBotChallenge, setAntiBotChallenge] = React.useState<AntiBotChallenge | null>(null)
-  const [captchaVerified, setCaptchaVerified] = React.useState(false)
+  const [turnstileToken, setTurnstileToken] = React.useState<string | null>(null)
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = React.useState(0)
   
   // Password strength indicators
   const [passwordStrength, setPasswordStrength] = React.useState({
@@ -163,10 +164,35 @@ export default function RegisterPage() {
     }
 
     // 3. Check captcha
-    if (!captchaVerified) {
+    if (!turnstileToken) {
       toast.error("Please complete the verification challenge")
       return
     }
+
+    const verifyResponse = await fetch("/api/turnstile/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        token: turnstileToken,
+        action: "register",
+      }),
+    })
+
+    if (!verifyResponse.ok) {
+      const data = (await verifyResponse.json().catch(() => null)) as
+        | { error?: string }
+        | null
+      toast.error(data?.error || "Verification failed. Please retry.")
+      setTurnstileToken(null)
+      setTurnstileWidgetKey((prev) => prev + 1)
+      return
+    }
+
+    // Token is one-time use. Force new token for the next attempt.
+    setTurnstileToken(null)
+    setTurnstileWidgetKey((prev) => prev + 1)
 
     // Check honeypot
     if (honeypot) {
@@ -446,8 +472,10 @@ export default function RegisterPage() {
                 )}
               </div>
 
-              <SliderCaptcha
-                onVerify={setCaptchaVerified} 
+              <TurnstileCaptcha
+                key={`register-turnstile-${turnstileWidgetKey}`}
+                action="register"
+                onTokenChange={setTurnstileToken}
                 disabled={isLoading}
               />
 

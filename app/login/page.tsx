@@ -20,7 +20,7 @@ import { IconMail, IconLock, IconLoader2, IconAlertCircle } from "@tabler/icons-
 import { toast } from "sonner"
 import { createAntiBotChallenge, validateAntiBotChallenge, cleanupAntiBotChallenge, trackInputTiming, type AntiBotChallenge } from "@/lib/anti-bot"
 import { checkRateLimit } from "@/lib/rate-limit"
-import { SliderCaptcha } from "@/components/slider-captcha"
+import { TurnstileCaptcha } from "@/components/turnstile-captcha"
 
 function LoginForm() {
   const router = useRouter()
@@ -33,7 +33,8 @@ function LoginForm() {
   
   // Anti-bot challenge
   const [antiBotChallenge, setAntiBotChallenge] = React.useState<AntiBotChallenge | null>(null)
-  const [captchaVerified, setCaptchaVerified] = React.useState(false)
+  const [turnstileToken, setTurnstileToken] = React.useState<string | null>(null)
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = React.useState(0)
 
   // Initialize anti-bot challenge
   React.useEffect(() => {
@@ -150,10 +151,35 @@ function LoginForm() {
     }
 
     // 3. Check captcha
-    if (!captchaVerified) {
+    if (!turnstileToken) {
       toast.error("Please complete the verification challenge")
       return
     }
+
+    const verifyResponse = await fetch("/api/turnstile/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        token: turnstileToken,
+        action: "login",
+      }),
+    })
+
+    if (!verifyResponse.ok) {
+      const data = (await verifyResponse.json().catch(() => null)) as
+        | { error?: string }
+        | null
+      toast.error(data?.error || "Verification failed. Please retry.")
+      setTurnstileToken(null)
+      setTurnstileWidgetKey((prev) => prev + 1)
+      return
+    }
+
+    // Token is one-time use. Force new token for the next attempt.
+    setTurnstileToken(null)
+    setTurnstileWidgetKey((prev) => prev + 1)
 
     // Check honeypot
     if (honeypot) {
@@ -327,8 +353,10 @@ function LoginForm() {
                 )}
               </div>
 
-              <SliderCaptcha
-                onVerify={setCaptchaVerified} 
+              <TurnstileCaptcha
+                key={`login-turnstile-${turnstileWidgetKey}`}
+                action="login"
+                onTokenChange={setTurnstileToken}
                 disabled={isLoading}
               />
 
