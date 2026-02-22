@@ -6,7 +6,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardAction,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -88,13 +87,17 @@ export function CommunityFloatingCard() {
             <span className="text-xs font-medium tracking-wide text-white/90">proxyless</span>
           </div>
         </div>
-        <CardHeader className="relative z-40">
-          <CardAction>
-            <Badge variant="secondary">Coming Soon</Badge>
-          </CardAction>
-          <CardTitle>Google Proxyless Scraper</CardTitle>
+        <CardHeader className="relative z-40 gap-1.5">
+          <div className="flex items-start justify-between gap-2">
+            <CardTitle className="min-w-0 whitespace-nowrap text-sm leading-tight">
+              Google Proxyless Scraper
+            </CardTitle>
+            <Badge variant="secondary" className="-mt-1 shrink-0">
+              Coming Soon
+            </Badge>
+          </div>
           <CardDescription>
-            High-performance proxyless Google engine for real-time scraping and rank detection.
+            High-performance proxyless Google scraping with live rank validation, powered by Lite, Fast, and Deep modes.
           </CardDescription>
         </CardHeader>
         <CardFooter className="relative z-40">
@@ -108,3 +111,4 @@ export function CommunityFloatingCard() {
     </div>
   )
 }
+
