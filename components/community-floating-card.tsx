@@ -15,6 +15,7 @@ import {
 
 const DISMISSED_KEY = "sqlbots.communityCard.dismissed.v1"
 const COMMUNITY_URL = "https://discord.gg/es6vcqA5zS"
+const DISMISS_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export function CommunityFloatingCard() {
   const [visible, setVisible] = React.useState(false)
@@ -22,8 +23,20 @@ export function CommunityFloatingCard() {
 
   React.useEffect(() => {
     try {
-      const dismissed = window.localStorage.getItem(DISMISSED_KEY) === "1"
-      setVisible(!dismissed)
+      const raw = window.localStorage.getItem(DISMISSED_KEY)
+      if (!raw) {
+        setVisible(true)
+        return
+      }
+
+      const dismissedUntil = Number(raw)
+      if (!Number.isFinite(dismissedUntil) || Date.now() >= dismissedUntil) {
+        window.localStorage.removeItem(DISMISSED_KEY)
+        setVisible(true)
+        return
+      }
+
+      setVisible(false)
     } catch {
       setVisible(true)
     }
@@ -31,7 +44,7 @@ export function CommunityFloatingCard() {
 
   const handleDismiss = React.useCallback(() => {
     try {
-      window.localStorage.setItem(DISMISSED_KEY, "1")
+      window.localStorage.setItem(DISMISSED_KEY, String(Date.now() + DISMISS_TTL_MS))
     } catch {
       // Ignore storage failures and still hide this session.
     }
