@@ -18,6 +18,7 @@ import {
 import { DatabaseDetailContent } from "@/components/database-detail-content"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { AuthGuard } from "@/components/auth-guard"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export default function DatabaseDetailPage({
   params,
@@ -61,6 +62,7 @@ export default function DatabaseDetailPage({
           <DatabaseDetailContent taskId={id} rowId={rowId} />
         </SidebarInset>
       </SidebarProvider>
+      <CommunityFloatingCard />
     </AuthGuard>
   )
 }

@@ -7,14 +7,29 @@ import { IconRefresh, IconCheck } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 
 interface SliderCaptchaProps {
-  onVerify: (verified: boolean) => void
+  onVerify: (result: SliderCaptchaResult) => void
   disabled?: boolean
+}
+
+export interface SliderCaptchaResult {
+  verified: boolean
+  qualityScore: number
+  attempts: number
+  pointerType: "mouse" | "touch" | "pen" | "unknown"
+  dragDurationMs: number
+  reachedEnd: boolean
 }
 
 type PointerSample = {
   x: number
   y: number
   t: number
+}
+
+type TrajectoryAnalysis = {
+  humanLike: boolean
+  qualityScore: number
+  dragDurationMs: number
 }
 
 export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
@@ -25,33 +40,47 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
   const rafRef = React.useRef<number | null>(null)
   const pendingPointRef = React.useRef<{ x: number; y: number } | null>(null)
   const positionRef = React.useRef(0)
-  const pointerTypeRef = React.useRef<string>("mouse")
+  const pointerTypeRef = React.useRef<"mouse" | "touch" | "pen" | "unknown">("mouse")
 
   const [isDragging, setIsDragging] = React.useState(false)
   const [status, setStatus] = React.useState<"idle" | "dragging" | "success" | "failed">("idle")
   const [message, setMessage] = React.useState("Drag the slider to verify")
   const [position, setPosition] = React.useState(0)
+  const [attempts, setAttempts] = React.useState(0)
 
   const thumbSize = 36
-  const threshold = 0.96
+  const threshold = 0.9
   const verified = status === "success"
 
-  const reset = React.useCallback(() => {
+  const clearDragState = React.useCallback(() => {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
     }
     setIsDragging(false)
-    setStatus("idle")
-    setMessage("Drag the slider to verify")
     setPosition(0)
     positionRef.current = 0
     samplesRef.current = []
     pointerIdRef.current = null
     metricsRef.current = null
     pendingPointRef.current = null
-    onVerify(false)
-  }, [onVerify])
+  }, [])
+
+  const reset = React.useCallback(() => {
+    clearDragState()
+    setIsDragging(false)
+    setStatus("idle")
+    setMessage("Drag the slider to verify")
+    setAttempts(0)
+    onVerify({
+      verified: false,
+      qualityScore: 0,
+      attempts: 0,
+      pointerType: pointerTypeRef.current,
+      dragDurationMs: 0,
+      reachedEnd: false,
+    })
+  }, [clearDragState, onVerify])
 
   const updatePosition = React.useCallback(
     (clientX: number, clientY: number) => {
@@ -67,20 +96,22 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
     [thumbSize, verified]
   )
 
-  const isHumanLikeTrajectory = React.useCallback(() => {
+  const analyzeTrajectory = React.useCallback((): TrajectoryAnalysis => {
     const samples = samplesRef.current
-    if (samples.length < 4) return false
+    if (samples.length < 4) {
+      return { humanLike: false, qualityScore: 15, dragDurationMs: 0 }
+    }
 
     const first = samples[0]
     const last = samples[samples.length - 1]
     const duration = last.t - first.t
-    if (duration < 180 || duration > 15000) return false
+    const dragDurationMs = Math.max(0, Math.round(duration))
 
     const dx = last.x - first.x
-    if (dx < 80) return false
 
     let pathDistance = 0
     let maxSegmentDistance = 0
+    let yTravel = 0
     const speeds: number[] = []
 
     for (let i = 1; i < samples.length; i += 1) {
@@ -93,28 +124,39 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
 
       pathDistance += segDist
       maxSegmentDistance = Math.max(maxSegmentDistance, segDist)
+      yTravel += Math.abs(segDy)
       speeds.push(segDist / segDt)
     }
 
-    const straightness = pathDistance / Math.max(1, dx)
-    if (straightness < 1 || straightness > 6) return false
-    if (maxSegmentDistance > 240) return false
+    const straightness = pathDistance / Math.max(1, Math.abs(dx))
 
     const meanSpeed = speeds.reduce((a, b) => a + b, 0) / Math.max(1, speeds.length)
     const variance =
       speeds.reduce((acc, v) => acc + (v - meanSpeed) ** 2, 0) / Math.max(1, speeds.length)
     const speedStd = Math.sqrt(variance)
     const speedJitter = speedStd / Math.max(0.0001, meanSpeed)
-    if (pointerTypeRef.current !== "touch" && speedJitter < 0.01 && duration < 700) return false
 
-    return true
+    let qualityScore = 100
+
+    if (duration < 120) qualityScore -= 35
+    if (duration > 18_000) qualityScore -= 20
+    if (dx < 60) qualityScore -= 30
+    if (straightness < 1 || straightness > 8) qualityScore -= 25
+    if (maxSegmentDistance > 280) qualityScore -= 20
+    if (pointerTypeRef.current !== "touch" && speedJitter < 0.006 && duration < 800) qualityScore -= 18
+    if (yTravel < 1.5) qualityScore -= 8
+
+    qualityScore = Math.max(0, Math.min(100, Math.round(qualityScore)))
+    const humanLike = qualityScore >= 45 && duration >= 90 && dx >= 60
+
+    return { humanLike, qualityScore, dragDurationMs }
   }, [])
 
   const startDrag = React.useCallback(
     (event: React.PointerEvent<HTMLButtonElement>) => {
       if (disabled || verified) return
 
-      reset()
+      clearDragState()
       setIsDragging(true)
       setStatus("dragging")
       setMessage("Keep sliding to the end")
@@ -124,14 +166,17 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
         // Some mobile browsers don't fully support pointer capture on buttons.
       }
       pointerIdRef.current = event.pointerId
-      pointerTypeRef.current = event.pointerType || "mouse"
+      pointerTypeRef.current =
+        event.pointerType === "mouse" || event.pointerType === "touch" || event.pointerType === "pen"
+          ? event.pointerType
+          : "unknown"
       if (trackRef.current) {
         const rect = trackRef.current.getBoundingClientRect()
         metricsRef.current = { left: rect.left, maxX: Math.max(1, rect.width - thumbSize) }
       }
       updatePosition(event.clientX, event.clientY)
     },
-    [disabled, reset, thumbSize, updatePosition, verified]
+    [clearDragState, disabled, thumbSize, updatePosition, verified]
   )
 
   const queueDragMove = React.useCallback(
@@ -164,25 +209,43 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
       }
       const metrics = metricsRef.current
       const reachedEnd = metrics ? positionRef.current / metrics.maxX >= threshold : false
-      const humanLike = isHumanLikeTrajectory()
+      const analysis = analyzeTrajectory()
+      const nextAttempts = attempts + 1
+      setAttempts(nextAttempts)
 
-      if (reachedEnd && humanLike) {
+      if (reachedEnd && analysis.humanLike) {
         setStatus("success")
         setMessage("Verified")
-        onVerify(true)
+        onVerify({
+          verified: true,
+          qualityScore: analysis.qualityScore,
+          attempts: nextAttempts,
+          pointerType: pointerTypeRef.current,
+          dragDurationMs: analysis.dragDurationMs,
+          reachedEnd: true,
+        })
         return
       }
 
-      setStatus("failed")
-      setMessage("Verification failed, try a natural drag")
-      setPosition(0)
-      positionRef.current = 0
-      onVerify(false)
-      samplesRef.current = []
-      metricsRef.current = null
-      pendingPointRef.current = null
+      if (nextAttempts <= 1) {
+        setStatus("idle")
+        setMessage("Almost there, try once more")
+      } else {
+        setStatus("failed")
+        setMessage("Verification failed, try a natural drag")
+      }
+
+      clearDragState()
+      onVerify({
+        verified: false,
+        qualityScore: analysis.qualityScore,
+        attempts: nextAttempts,
+        pointerType: pointerTypeRef.current,
+        dragDurationMs: analysis.dragDurationMs,
+        reachedEnd,
+      })
     },
-    [isDragging, isHumanLikeTrajectory, onVerify, threshold]
+    [analyzeTrajectory, attempts, clearDragState, isDragging, onVerify, threshold]
   )
 
   const onPointerMove = React.useCallback(
@@ -306,6 +369,8 @@ export function SliderCaptcha({ onVerify, disabled }: SliderCaptchaProps) {
 
       {status === "failed" ? (
         <p className="text-xs text-destructive">Verification failed. Please drag again.</p>
+      ) : attempts > 0 && !verified ? (
+        <p className="text-xs text-muted-foreground">Attempt {attempts + 1} of 2</p>
       ) : null}
     </div>
   )

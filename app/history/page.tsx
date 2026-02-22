@@ -15,6 +15,7 @@ import {
 import { HistoryContent } from "@/components/history-content"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { AuthGuard } from "@/components/auth-guard"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export const metadata: Metadata = {
   title: "History",
@@ -47,6 +48,7 @@ export default function HistoryPage() {
         <HistoryContent />
       </SidebarInset>
     </SidebarProvider>
+    <CommunityFloatingCard />
     </AuthGuard>
   )
 }

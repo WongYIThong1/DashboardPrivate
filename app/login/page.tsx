@@ -18,23 +18,33 @@ import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconMail, IconLock, IconLoader2, IconAlertCircle } from "@tabler/icons-react"
 import { toast } from "sonner"
-import { createAntiBotChallenge, validateAntiBotChallenge, cleanupAntiBotChallenge, trackInputTiming, type AntiBotChallenge } from "@/lib/anti-bot"
-import { checkRateLimit } from "@/lib/rate-limit"
-import { TurnstileCaptcha } from "@/components/turnstile-captcha"
+import {
+  createAntiBotChallenge,
+  collectAntiBotSignals,
+  cleanupAntiBotChallenge,
+  trackInputTiming,
+  type AntiBotChallenge,
+} from "@/lib/anti-bot"
+import { evaluateAuthRisk, type AuthCaptchaState } from "@/lib/auth-risk"
+import { SliderCaptcha, type SliderCaptchaResult } from "@/components/slider-captcha"
 
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const formRef = React.useRef<HTMLFormElement>(null)
   const [isLoading, setIsLoading] = React.useState(false)
   const [isCheckingAuth, setIsCheckingAuth] = React.useState(true)
   const [rememberMe, setRememberMe] = React.useState(false)
   const [errors, setErrors] = React.useState<{ email?: string; password?: string }>({})
+  const toastThrottleRef = React.useRef<Record<string, number>>({})
+  const submitLockRef = React.useRef(false)
   const hasShownRegistrationToast = React.useRef(false)
   
   // Anti-bot challenge
   const [antiBotChallenge, setAntiBotChallenge] = React.useState<AntiBotChallenge | null>(null)
-  const [turnstileToken, setTurnstileToken] = React.useState<string | null>(null)
-  const [turnstileWidgetKey, setTurnstileWidgetKey] = React.useState(0)
+  const [challengeRequired, setChallengeRequired] = React.useState(false)
+  const [sliderResult, setSliderResult] = React.useState<SliderCaptchaResult | null>(null)
+  const [cooldownUntil, setCooldownUntil] = React.useState<number | null>(null)
 
   // Initialize anti-bot challenge
   React.useEffect(() => {
@@ -98,6 +108,20 @@ function LoginForm() {
     }
   }, [searchParams])
 
+  // 验证邮箱格式
+  const validateEmail = (email: string): boolean => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    return emailRegex.test(email)
+  }
+
+  const notifyErrorOnce = React.useCallback((key: string, message: string, windowMs = 1800) => {
+    const now = Date.now()
+    const last = toastThrottleRef.current[key] || 0
+    if (now - last < windowMs) return
+    toastThrottleRef.current[key] = now
+    toast.error(message, { id: key })
+  }, [])
+
   // 如果正在检查认证状态，显示加载
   if (isCheckingAuth) {
     return (
@@ -107,150 +131,153 @@ function LoginForm() {
     )
   }
 
-  // 验证邮箱格式
-  const validateEmail = (email: string): boolean => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    return emailRegex.test(email)
-  }
-
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    if (submitLockRef.current) return
+    submitLockRef.current = true
     setErrors({})
-
-    // 先获取表单数据（在异步操作之前）
-    const formData = new FormData(e.currentTarget)
-    const email = formData.get("email") as string
-    const password = formData.get("password") as string
-    const honeypot = formData.get("website") as string
-
-    // 1. Check rate limit (异步)
-    const rateLimitCheck = await checkRateLimit('login')
-    if (!rateLimitCheck.allowed) {
-      toast.error(`Too many login attempts. Please try again in ${rateLimitCheck.remainingTime} minutes.`)
-      return
-    }
-
-    // 2. Validate anti-bot challenge
-    if (antiBotChallenge) {
-      const validation = validateAntiBotChallenge(antiBotChallenge)
-      if (!validation.passed) {
-        toast.error("Please complete the form naturally. Automated submissions are not allowed.")
-        // Reset challenge
-        const newChallenge = createAntiBotChallenge()
-        setAntiBotChallenge(newChallenge)
-        return
-      }
-      
-      // 检查行为分数
-      if (validation.score < 60) {
-        toast.error("Suspicious activity detected. Please try again.")
-        const newChallenge = createAntiBotChallenge()
-        setAntiBotChallenge(newChallenge)
-        return
-      }
-    }
-
-    // 3. Check captcha
-    if (!turnstileToken) {
-      toast.error("Please complete the verification challenge")
-      return
-    }
-
-    const verifyResponse = await fetch("/api/turnstile/verify", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        token: turnstileToken,
-        action: "login",
-      }),
-    })
-
-    if (!verifyResponse.ok) {
-      const data = (await verifyResponse.json().catch(() => null)) as
-        | { error?: string }
-        | null
-      toast.error(data?.error || "Verification failed. Please retry.")
-      setTurnstileToken(null)
-      setTurnstileWidgetKey((prev) => prev + 1)
-      return
-    }
-
-    // Token is one-time use. Force new token for the next attempt.
-    setTurnstileToken(null)
-    setTurnstileWidgetKey((prev) => prev + 1)
-
-    // Check honeypot
-    if (honeypot) {
-      return // Bot detected
-    }
-
-    // 客户端验证
-    const newErrors: { email?: string; password?: string } = {}
-    if (!email) {
-      newErrors.email = "Email is required"
-    } else if (!validateEmail(email)) {
-      newErrors.email = "Invalid email format"
-    }
-    if (!password) {
-      newErrors.password = "Password is required"
-    } else if (password.length < 8) {
-      newErrors.password = "Password must be at least 8 characters"
-    }
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors)
-      return
-    }
-
-    setIsLoading(true)
-    // recordAttempt 现在是空函数，checkRateLimit 已经记录了尝试
-
     try {
-      const { createClient } = await import('@/lib/supabase/client')
-      const supabase = createClient()
-      
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
-        password,
+      // 先获取表单数据（在异步操作之前）
+      const formData = new FormData(e.currentTarget)
+      const email = formData.get("email") as string
+      const password = formData.get("password") as string
+      const honeypot = formData.get("website") as string
+
+      if (cooldownUntil && Date.now() < cooldownUntil) {
+        const waitSec = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000))
+        notifyErrorOnce("login-cooldown", `Too many attempts. Please retry in ${waitSec}s.`)
+        return
+      }
+
+      const antiBotSignals = collectAntiBotSignals(antiBotChallenge)
+      const captchaState: AuthCaptchaState = sliderResult
+        ? sliderResult.verified
+          ? "slider_passed"
+          : "slider_failed"
+        : "none"
+      const risk = await evaluateAuthRisk({
+        action: "login",
+        captchaState,
+        clientSignals: {
+          elapsedMs: antiBotSignals.elapsedMs,
+          antiBotScore: antiBotSignals.antiBotScore,
+          inputSwitchCount: antiBotSignals.inputSwitchCount,
+          hasMouseMovement: antiBotSignals.hasMouseMovement,
+          hasNaturalMousePath: antiBotSignals.hasNaturalMousePath,
+          hasNaturalInputPattern: antiBotSignals.hasNaturalInputPattern,
+          hasFocusActivity: antiBotSignals.hasFocusActivity,
+          slider: sliderResult,
+        },
       })
 
-      if (error) {
-        const errorMessages: Record<string, string> = {
-          'Invalid login credentials': "Invalid email or password",
-          'Email not confirmed': "Please verify your email address",
+      if (!risk.success) {
+        notifyErrorOnce("login-risk-failed", risk.error || "Risk evaluation failed. Please retry.")
+        return
+      }
+
+      if (risk.decision === "throttle" || risk.decision === "deny") {
+        const cooldownMs = Math.max(15, risk.cooldownSec || 15) * 1000
+        setCooldownUntil(Date.now() + cooldownMs)
+        notifyErrorOnce(
+          "login-throttle",
+          risk.decision === "deny"
+            ? `Request blocked. Retry in ${Math.max(15, risk.cooldownSec || 15)}s.`
+            : `Too many attempts. Retry in ${Math.max(15, risk.cooldownSec || 15)}s.`
+        )
+        return
+      }
+
+      if (risk.decision === "challenge") {
+        setChallengeRequired(true)
+        if (!sliderResult?.verified) {
+          notifyErrorOnce("login-need-challenge", "Please complete the verification challenge")
+          return
         }
+        notifyErrorOnce(
+          "login-challenge-quality",
+          "Verification quality was too low. Please drag naturally and try again."
+        )
+        setSliderResult(null)
+        return
+      }
+      setChallengeRequired(false)
+      setCooldownUntil(null)
+
+      // Check honeypot
+      if (honeypot) {
+        return // Bot detected
+      }
+
+      // 客户端验证
+      const newErrors: { email?: string; password?: string } = {}
+      if (!email) {
+        newErrors.email = "Email is required"
+      } else if (!validateEmail(email)) {
+        newErrors.email = "Invalid email format"
+      }
+      if (!password) {
+        newErrors.password = "Password is required"
+      } else if (password.length < 8) {
+        newErrors.password = "Password must be at least 8 characters"
+      }
+
+      if (Object.keys(newErrors).length > 0) {
+        setErrors(newErrors)
+        return
+      }
+
+      setIsLoading(true)
+      // Risk API includes rate-limit recording and risk event telemetry.
+
+      try {
+        const { createClient } = await import('@/lib/supabase/client')
+        const supabase = createClient()
         
-        const errorMessage = errorMessages[error.message] || error.message || "Login failed"
-        toast.error(errorMessage, {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        })
+
+        if (error) {
+          const errorMessages: Record<string, string> = {
+            'Invalid login credentials': "Invalid email or password",
+            'Email not confirmed': "Please verify your email address",
+          }
+          
+          const errorMessage = errorMessages[error.message] || error.message || "Login failed"
+          toast.error(errorMessage, {
+            id: "login-auth-error",
+            icon: <IconAlertCircle className="size-4" />,
+          })
+          return
+        }
+
+        if (data.user) {
+          toast.success("Login successful!")
+          
+          const savedRedirect = sessionStorage.getItem('redirectAfterLogin')
+          const targetPath = '/dumper'
+          
+          if (savedRedirect) {
+            sessionStorage.removeItem('redirectAfterLogin')
+          }
+          
+          setTimeout(() => {
+            router.replace(targetPath)
+            router.refresh()
+          }, 100)
+        }
+      } catch (error) {
+        console.error("Login error:", error)
+        toast.error("Network error. Please check your connection.", {
+          id: "login-network",
           icon: <IconAlertCircle className="size-4" />,
         })
-        return
+      } finally {
+        setIsLoading(false)
       }
-
-      if (data.user) {
-        toast.success("Login successful!")
-        
-        const savedRedirect = sessionStorage.getItem('redirectAfterLogin')
-        const targetPath = '/dumper'
-        
-        if (savedRedirect) {
-          sessionStorage.removeItem('redirectAfterLogin')
-        }
-        
-        setTimeout(() => {
-          router.replace(targetPath)
-          router.refresh()
-        }, 100)
-      }
-    } catch (error) {
-      console.error("Login error:", error)
-      toast.error("Network error. Please check your connection.", {
-        icon: <IconAlertCircle className="size-4" />,
-      })
     } finally {
-      setIsLoading(false)
+      submitLockRef.current = false
     }
   }
 
@@ -286,7 +313,7 @@ function LoginForm() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+            <form ref={formRef} onSubmit={handleSubmit} className="flex flex-col gap-5">
               {/* Honeypot - hidden from real users */}
               <div className="absolute -left-[9999px]" aria-hidden="true">
                 <label htmlFor="website">Website</label>
@@ -353,12 +380,12 @@ function LoginForm() {
                 )}
               </div>
 
-              <TurnstileCaptcha
-                key={`login-turnstile-${turnstileWidgetKey}`}
-                action="login"
-                onTokenChange={setTurnstileToken}
-                disabled={isLoading}
-              />
+              {challengeRequired ? (
+                <SliderCaptcha
+                  onVerify={setSliderResult}
+                  disabled={isLoading}
+                />
+              ) : null}
 
               <div className="flex items-center gap-2">
                 <Checkbox 
@@ -372,7 +399,11 @@ function LoginForm() {
                 </Label>
               </div>
 
-              <Button type="submit" className="w-full mt-2" disabled={isLoading}>
+              <Button
+                type="submit"
+                className="w-full mt-2 cursor-pointer"
+                disabled={isLoading}
+              >
                 {isLoading ? (
                   <>
                     <IconLoader2 className="size-4 mr-2 animate-spin" />

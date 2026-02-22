@@ -17,12 +17,19 @@ import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconMail, IconLock, IconUser, IconLoader2, IconAlertCircle, IconEye, IconEyeOff, IconCheck, IconX } from "@tabler/icons-react"
 import { toast } from "sonner"
-import { createAntiBotChallenge, validateAntiBotChallenge, cleanupAntiBotChallenge, trackInputTiming, type AntiBotChallenge } from "@/lib/anti-bot"
-import { checkRateLimit } from "@/lib/rate-limit"
-import { TurnstileCaptcha } from "@/components/turnstile-captcha"
+import {
+  createAntiBotChallenge,
+  collectAntiBotSignals,
+  cleanupAntiBotChallenge,
+  trackInputTiming,
+  type AntiBotChallenge,
+} from "@/lib/anti-bot"
+import { evaluateAuthRisk, type AuthCaptchaState } from "@/lib/auth-risk"
+import { SliderCaptcha, type SliderCaptchaResult } from "@/components/slider-captcha"
 
 export default function RegisterPage() {
   const router = useRouter()
+  const formRef = React.useRef<HTMLFormElement>(null)
   const [isLoading, setIsLoading] = React.useState(false)
   const [isCheckingAuth, setIsCheckingAuth] = React.useState(true)
   const [agreed, setAgreed] = React.useState(false)
@@ -33,11 +40,14 @@ export default function RegisterPage() {
     email?: string
     password?: string 
   }>({})
+  const toastThrottleRef = React.useRef<Record<string, number>>({})
+  const submitLockRef = React.useRef(false)
   
   // Anti-bot challenge
   const [antiBotChallenge, setAntiBotChallenge] = React.useState<AntiBotChallenge | null>(null)
-  const [turnstileToken, setTurnstileToken] = React.useState<string | null>(null)
-  const [turnstileWidgetKey, setTurnstileWidgetKey] = React.useState(0)
+  const [challengeRequired, setChallengeRequired] = React.useState(false)
+  const [sliderResult, setSliderResult] = React.useState<SliderCaptchaResult | null>(null)
+  const [cooldownUntil, setCooldownUntil] = React.useState<number | null>(null)
   
   // Password strength indicators
   const [passwordStrength, setPasswordStrength] = React.useState({
@@ -91,15 +101,6 @@ export default function RegisterPage() {
     })
   }, [password])
 
-  // 如果正在检查认证状态，显示加载
-  if (isCheckingAuth) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <IconLoader2 className="size-8 animate-spin text-muted-foreground" />
-      </div>
-    )
-  }
-
   // Validation functions
   const validateUsername = (username: string): string | undefined => {
     if (!username) return "Username is required"
@@ -125,160 +126,185 @@ export default function RegisterPage() {
     return undefined
   }
 
+  const notifyErrorOnce = React.useCallback((key: string, message: string, windowMs = 1800) => {
+    const now = Date.now()
+    const last = toastThrottleRef.current[key] || 0
+    if (now - last < windowMs) return
+    toastThrottleRef.current[key] = now
+    toast.error(message, { id: key })
+  }, [])
+
+  // 如果正在检查认证状态，显示加载
+  if (isCheckingAuth) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <IconLoader2 className="size-8 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    if (submitLockRef.current) return
+    submitLockRef.current = true
     setErrors({})
-
-    // 先获取表单数据（在异步操作之前）
-    const formData = new FormData(e.currentTarget)
-    const username = (formData.get("username") as string).trim()
-    const email = (formData.get("email") as string).trim()
-    const password = formData.get("password") as string
-    const honeypot = formData.get("website") as string
-
-    // 1. Check rate limit (异步)
-    const rateLimitCheck = await checkRateLimit('register')
-    if (!rateLimitCheck.allowed) {
-      toast.error(`Too many registration attempts. Please try again in ${rateLimitCheck.remainingTime} minutes.`)
-      return
-    }
-
-    // 2. Validate anti-bot challenge
-    if (antiBotChallenge) {
-      const validation = validateAntiBotChallenge(antiBotChallenge)
-      if (!validation.passed) {
-        toast.error("Please complete the form naturally. Automated submissions are not allowed.")
-        // Reset challenge
-        const newChallenge = createAntiBotChallenge()
-        setAntiBotChallenge(newChallenge)
-        return
-      }
-      
-      // 检查行为分数
-      if (validation.score < 60) {
-        toast.error("Suspicious activity detected. Please try again.")
-        const newChallenge = createAntiBotChallenge()
-        setAntiBotChallenge(newChallenge)
-        return
-      }
-    }
-
-    // 3. Check captcha
-    if (!turnstileToken) {
-      toast.error("Please complete the verification challenge")
-      return
-    }
-
-    const verifyResponse = await fetch("/api/turnstile/verify", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        token: turnstileToken,
-        action: "register",
-      }),
-    })
-
-    if (!verifyResponse.ok) {
-      const data = (await verifyResponse.json().catch(() => null)) as
-        | { error?: string }
-        | null
-      toast.error(data?.error || "Verification failed. Please retry.")
-      setTurnstileToken(null)
-      setTurnstileWidgetKey((prev) => prev + 1)
-      return
-    }
-
-    // Token is one-time use. Force new token for the next attempt.
-    setTurnstileToken(null)
-    setTurnstileWidgetKey((prev) => prev + 1)
-
-    // Check honeypot
-    if (honeypot) {
-      return // Bot detected
-    }
-
-    // Client-side validation
-    const newErrors: typeof errors = {}
-    const usernameError = validateUsername(username)
-    const emailError = validateEmail(email)
-    const passwordError = validatePassword(password)
-
-    if (usernameError) newErrors.username = usernameError
-    if (emailError) newErrors.email = emailError
-    if (passwordError) newErrors.password = passwordError
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors)
-      return
-    }
-
-    if (!agreed) {
-      toast.error("You must agree to the Terms of Service and Privacy Policy")
-      return
-    }
-
-    setIsLoading(true)
-    // recordAttempt 现在是空函数，checkRateLimit 已经记录了尝试
-
     try {
-      const { createClient } = await import('@/lib/supabase/client')
-      const supabase = createClient()
-      
-      // 检查用户名是否已存在（不区分大小写）
-      const { data: existingUser, error: checkError } = await supabase
-        .from('user_profiles')
-        .select('username')
-        .ilike('username', username.trim())
-        .maybeSingle()
 
-      if (checkError && checkError.code !== 'PGRST116') {
-        console.error('Username check error:', checkError)
-        toast.error("Failed to verify username. Please try again.")
-        setIsLoading(false)
+      // 先获取表单数据（在异步操作之前）
+      const formData = new FormData(e.currentTarget)
+      const username = (formData.get("username") as string).trim()
+      const email = (formData.get("email") as string).trim()
+      const password = formData.get("password") as string
+      const honeypot = formData.get("website") as string
+
+      if (cooldownUntil && Date.now() < cooldownUntil) {
+        const waitSec = Math.max(1, Math.ceil((cooldownUntil - Date.now()) / 1000))
+        notifyErrorOnce("register-cooldown", `Too many attempts. Please retry in ${waitSec}s.`)
         return
       }
 
-      if (existingUser) {
-        setErrors({ username: "This username is already taken. Please choose a different one." })
-        setIsLoading(false)
-        return
-      }
-      
-      const { data, error } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
-        password,
-        options: {
-          data: {
-            username: username.trim(),
-          },
-          emailRedirectTo: `${window.location.origin}/login`,
-        }
+      const antiBotSignals = collectAntiBotSignals(antiBotChallenge)
+      const captchaState: AuthCaptchaState = sliderResult
+        ? sliderResult.verified
+          ? "slider_passed"
+          : "slider_failed"
+        : "none"
+      const risk = await evaluateAuthRisk({
+        action: "register",
+        captchaState,
+        clientSignals: {
+          elapsedMs: antiBotSignals.elapsedMs,
+          antiBotScore: antiBotSignals.antiBotScore,
+          inputSwitchCount: antiBotSignals.inputSwitchCount,
+          hasMouseMovement: antiBotSignals.hasMouseMovement,
+          hasNaturalMousePath: antiBotSignals.hasNaturalMousePath,
+          hasNaturalInputPattern: antiBotSignals.hasNaturalInputPattern,
+          hasFocusActivity: antiBotSignals.hasFocusActivity,
+          slider: sliderResult,
+        },
       })
 
-      if (error) {
-        const errorMessages: Record<string, string> = {
-          'User already registered': "This email is already registered. Please use a different email or try logging in.",
-          'Password should be at least 6 characters': "Password must be at least 8 characters",
-        }
-        
-        const errorMessage = errorMessages[error.message] || error.message || "Registration failed"
-        toast.error(errorMessage)
+      if (!risk.success) {
+        notifyErrorOnce("register-risk-failed", risk.error || "Risk evaluation failed. Please retry.")
         return
       }
 
-      if (data.user) {
-        // 注册成功后立即登出，不自动登录
-        await supabase.auth.signOut()
-        
-        // 跳转到登录页面，在那里显示成功消息
-        router.push("/login?registered=true")
+      if (risk.decision === "throttle" || risk.decision === "deny") {
+        const cooldownMs = Math.max(15, risk.cooldownSec || 15) * 1000
+        setCooldownUntil(Date.now() + cooldownMs)
+        notifyErrorOnce(
+          "register-throttle",
+          risk.decision === "deny"
+            ? `Request blocked. Retry in ${Math.max(15, risk.cooldownSec || 15)}s.`
+            : `Too many attempts. Retry in ${Math.max(15, risk.cooldownSec || 15)}s.`
+        )
+        return
       }
-    } catch {
-      toast.error("Network error. Please check your connection.")
+
+      if (risk.decision === "challenge") {
+        setChallengeRequired(true)
+        if (!sliderResult?.verified) {
+          notifyErrorOnce("register-need-challenge", "Please complete the verification challenge")
+          return
+        }
+        notifyErrorOnce(
+          "register-challenge-quality",
+          "Verification quality was too low. Please drag naturally and try again."
+        )
+        setSliderResult(null)
+        return
+      }
+      setChallengeRequired(false)
+      setCooldownUntil(null)
+
+      // Check honeypot
+      if (honeypot) {
+        return // Bot detected
+      }
+
+      // Client-side validation
+      const newErrors: typeof errors = {}
+      const usernameError = validateUsername(username)
+      const emailError = validateEmail(email)
+      const passwordError = validatePassword(password)
+
+      if (usernameError) newErrors.username = usernameError
+      if (emailError) newErrors.email = emailError
+      if (passwordError) newErrors.password = passwordError
+
+      if (Object.keys(newErrors).length > 0) {
+        setErrors(newErrors)
+        return
+      }
+
+      if (!agreed) {
+        notifyErrorOnce("register-terms", "You must agree to the Terms of Service and Privacy Policy")
+        return
+      }
+
+      setIsLoading(true)
+      // Risk API includes rate-limit recording and risk event telemetry.
+
+      try {
+        const { createClient } = await import('@/lib/supabase/client')
+        const supabase = createClient()
+      
+        // 检查用户名是否已存在（不区分大小写）
+        const { data: existingUser, error: checkError } = await supabase
+          .from('user_profiles')
+          .select('username')
+          .ilike('username', username.trim())
+          .maybeSingle()
+
+        if (checkError && checkError.code !== 'PGRST116') {
+          console.error('Username check error:', checkError)
+          notifyErrorOnce("register-username-check", "Failed to verify username. Please try again.")
+          setIsLoading(false)
+          return
+        }
+
+        if (existingUser) {
+          setErrors({ username: "This username is already taken. Please choose a different one." })
+          setIsLoading(false)
+          return
+        }
+      
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim().toLowerCase(),
+          password,
+          options: {
+            data: {
+              username: username.trim(),
+            },
+            emailRedirectTo: `${window.location.origin}/login`,
+          }
+        })
+
+        if (error) {
+          const errorMessages: Record<string, string> = {
+            'User already registered': "This email is already registered. Please use a different email or try logging in.",
+            'Password should be at least 6 characters': "Password must be at least 8 characters",
+          }
+          
+          const errorMessage = errorMessages[error.message] || error.message || "Registration failed"
+          notifyErrorOnce("register-auth-error", errorMessage)
+          return
+        }
+
+        if (data.user) {
+          // 注册成功后立即登出，不自动登录
+          await supabase.auth.signOut()
+          
+          // 跳转到登录页面，在那里显示成功消息
+          router.push("/login?registered=true")
+        }
+      } catch {
+        notifyErrorOnce("register-network", "Network error. Please check your connection.")
+      } finally {
+        setIsLoading(false)
+      }
     } finally {
-      setIsLoading(false)
+      submitLockRef.current = false
     }
   }
 
@@ -314,7 +340,7 @@ export default function RegisterPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+            <form ref={formRef} onSubmit={handleSubmit} className="flex flex-col gap-5">
               {/* Honeypot - hidden from real users */}
               <div className="absolute -left-[9999px]" aria-hidden="true">
                 <label htmlFor="website">Website</label>
@@ -472,12 +498,12 @@ export default function RegisterPage() {
                 )}
               </div>
 
-              <TurnstileCaptcha
-                key={`register-turnstile-${turnstileWidgetKey}`}
-                action="register"
-                onTokenChange={setTurnstileToken}
-                disabled={isLoading}
-              />
+              {challengeRequired ? (
+                <SliderCaptcha
+                  onVerify={setSliderResult}
+                  disabled={isLoading}
+                />
+              ) : null}
 
               <div className="flex items-start gap-2">
                 <Checkbox 
@@ -495,7 +521,11 @@ export default function RegisterPage() {
                 </Label>
               </div>
 
-              <Button type="submit" className="w-full mt-2" disabled={isLoading}>
+              <Button
+                type="submit"
+                className="w-full mt-2 cursor-pointer"
+                disabled={isLoading}
+              >
                 {isLoading ? (
                   <>
                     <IconLoader2 className="size-4 mr-2 animate-spin" />

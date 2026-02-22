@@ -18,6 +18,7 @@ import {
 import { TaskDetailContent } from "@/components/task-detail-content"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { AuthGuard } from "@/components/auth-guard"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export default function TaskDetailPage({
   params,
@@ -57,6 +58,7 @@ export default function TaskDetailPage({
           <TaskDetailContent id={id} />
         </SidebarInset>
       </SidebarProvider>
+      <CommunityFloatingCard />
     </AuthGuard>
   )
 }

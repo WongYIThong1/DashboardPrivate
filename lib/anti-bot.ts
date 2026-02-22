@@ -201,6 +201,28 @@ export interface AntiBotChallenge {
   fingerprint: string
 }
 
+export interface AntiBotSignals {
+  elapsedMs: number
+  antiBotScore: number
+  inputSwitchCount: number
+  hasMouseMovement: boolean
+  hasNaturalMousePath: boolean
+  hasNaturalInputPattern: boolean
+  hasFocusActivity: boolean
+  reasonCodes: string[]
+}
+
+function getInputSwitchCount(): number {
+  if (inputSequence.length < 2) return 0
+  let switches = 0
+  for (let i = 1; i < inputSequence.length; i += 1) {
+    if (inputSequence[i].field !== inputSequence[i - 1].field) {
+      switches += 1
+    }
+  }
+  return switches
+}
+
 export function createAntiBotChallenge(): AntiBotChallenge {
   trackMouseMovement()
   trackFocusEvents()
@@ -264,6 +286,32 @@ export function validateAntiBotChallenge(challenge: AntiBotChallenge): {
     passed, 
     reason: passed ? undefined : reasons.join(', '),
     score 
+  }
+}
+
+export function collectAntiBotSignals(challenge: AntiBotChallenge | null): AntiBotSignals {
+  const now = Date.now()
+  const elapsedMs =
+    challenge && Number.isFinite(challenge.startTime) ? Math.max(0, now - challenge.startTime) : 0
+  const validation = challenge
+    ? validateAntiBotChallenge(challenge)
+    : { score: 0, reason: "missing_challenge" }
+  const reasonCodes = typeof validation.reason === "string" && validation.reason.length > 0
+    ? validation.reason
+        .split(",")
+        .map((item) => item.trim().toLowerCase().replace(/\s+/g, "_"))
+        .filter(Boolean)
+    : []
+
+  return {
+    elapsedMs,
+    antiBotScore: Math.max(0, Math.min(100, validation.score || 0)),
+    inputSwitchCount: getInputSwitchCount(),
+    hasMouseMovement: hasMouseMovement(),
+    hasNaturalMousePath: hasNaturalMousePath(),
+    hasNaturalInputPattern: hasNaturalInputPattern(),
+    hasFocusActivity: hasFocusActivity(),
+    reasonCodes,
   }
 }
 

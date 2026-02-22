@@ -13,6 +13,7 @@ import { Separator } from "@/components/ui/separator"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { SettingsContent } from "@/components/settings-content"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -49,6 +50,7 @@ export default function SettingsPage() {
           <SettingsContent />
         </SidebarInset>
       </SidebarProvider>
+      <CommunityFloatingCard />
     </AuthGuard>
   )
 }

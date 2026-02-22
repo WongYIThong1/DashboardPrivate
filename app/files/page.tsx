@@ -15,6 +15,7 @@ import {
 import { FilesContent } from "@/components/files-content"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { AuthGuard } from "@/components/auth-guard"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export const metadata: Metadata = {
   title: "Cloud",
@@ -47,6 +48,7 @@ export default function FilesPage() {
         <FilesContent />
       </SidebarInset>
     </SidebarProvider>
+    <CommunityFloatingCard />
     </AuthGuard>
   )
 }

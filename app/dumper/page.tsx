@@ -17,6 +17,7 @@ import {
 import { TasksContent } from "@/components/tasks-content"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { AuthGuard } from "@/components/auth-guard"
+import { CommunityFloatingCard } from "@/components/community-floating-card"
 
 export const metadata: Metadata = {
   title: "Dumper",
@@ -53,6 +54,7 @@ export default function DumperPage() {
         <TasksContent />
       </SidebarInset>
     </SidebarProvider>
+    <CommunityFloatingCard />
     </AuthGuard>
   )
 }
